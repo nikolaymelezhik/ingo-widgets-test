@@ -39,11 +39,32 @@
     <h1>You're Registered! 🎉</h1>
     <p>Thanks for signing up. Share the news with your network below.</p>
 
-    <!-- InGo Confirmation Widget -->
-    <script src="https://cdn-staging.ingo.me/widgets/9FE77161983143CF99197D2D27C298F9.js"></script>
+    <form id="pageEditorForm" action="" method="GET">
+      <input type="hidden" name="submitted" value="1">
 
-    <!-- InGo Social Surface -->
-    <script src="https://cdn-staging.ingo.me/widgets/FB4AD9A22B3745A38F0303880D94F9DD.js"></script>
+      <!-- InGo Confirmation Widget -->
+      <script src="https://cdn-staging.ingo.me/widgets/9FE77161983143CF99197D2D27C298F9.js"></script>
+      <!-- InGo Social Surface -->
+      <script src="https://cdn-staging.ingo.me/widgets/FB4AD9A22B3745A38F0303880D94F9DD.js"></script>
+
+    </form>
   </div>
+
+  <script>
+    // QA: логує, яка саме кнопка сабмітить форму, перед перезавантаженням
+    document.addEventListener('submit', (e) => {
+      const s = e.submitter;
+      console.warn(
+        'SUBMIT by:', s,
+        '| type =', s?.getAttribute('type') ?? 'MISSING → defaults to submit',
+        '| text =', s?.textContent?.trim().slice(0, 40)
+      );
+    }, true);
+
+    // Показує в консолі, що сторінка справді перезавантажилась через сабміт
+    window.addEventListener('load', () => {
+      if (location.search) console.warn('PAGE RELOADED WITH:', location.search, '← баг відтворено');
+    });
+  </script>
 </body>
 </html>
