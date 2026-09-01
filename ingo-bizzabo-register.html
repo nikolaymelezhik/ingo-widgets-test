@@ -1,0 +1,349 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>InGo + Bizzabo registration — POC</title>
+<style>
+  body { margin: 0; font-family: system-ui, sans-serif; background: #f7f7f8; color: #1c1c1e; }
+  .page { max-width: 720px; margin: 0 auto; padding: 32px 20px 80px; }
+  .stage { background: #fff; border: 1px solid #e3e3e6; border-radius: 10px; padding: 20px; margin-bottom: 20px; }
+  .stage[hidden] { display: none; }
+  .stage h2 { font-size: 15px; text-transform: uppercase; letter-spacing: .06em; color: #6b6b70; margin: 0 0 14px; }
+  .muted { color: #6b6b70; font-size: 13px; }
+  .skip { background: none; border: 0; color: #3a6ea5; text-decoration: underline; cursor: pointer; font-size: 13px; padding: 8px 0 0; }
+  #debug { position: fixed; bottom: 0; left: 0; right: 0; max-height: 34vh; overflow: auto;
+           background: #14141a; color: #c8f0c8; font: 12px/1.5 ui-monospace, monospace; padding: 10px 14px; }
+  #debug b { color: #ffd479; }
+  #debug button { font: inherit; background: #2b2b36; color: #fff; border: 1px solid #45454f;
+                  border-radius: 4px; padding: 4px 10px; cursor: pointer; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<div class="page">
+
+  <!-- ============================================================
+       STAGE 1 — InGo Login ("Express Registration") widget
+       ============================================================ -->
+  <section class="stage" id="stage-login">
+    <h2>1 · Connect your profile</h2>
+    <div id="ingo-login-mount"></div>
+    <button class="skip" id="skip-login" type="button">Skip and register manually &rarr;</button>
+  </section>
+
+  <!-- ============================================================
+       STAGE 2 — Bizzabo registration flow widget
+       Injected by the controller so data-params can carry values
+       captured in stage 1.
+       ============================================================ -->
+  <section class="stage" id="stage-registration" hidden>
+    <h2>2 · Register</h2>
+    <div id="bizzabo-mount"></div>
+  </section>
+
+  <!-- ============================================================
+       STAGE 3 — InGo Confirmation (invisible) then Social
+       Confirmation MUST load and fire before Social.
+       ============================================================ -->
+  <section class="stage" id="stage-confirmation" hidden>
+    <h2>3 · You're registered</h2>
+    <div id="ingo-confirmation-mount"></div>
+    <div id="ingo-social-mount"></div>
+  </section>
+
+</div>
+
+<div id="debug">
+  <button id="force-complete" type="button">Force registration complete (stage 3)</button>
+  <div id="debug-log"></div>
+</div>
+
+<script>
+(function () {
+  "use strict";
+
+  // ==========================================================
+  // CONFIG
+  // ==========================================================
+  var CONFIG = {
+    ingoLoader: "https://cdn.ingo.me/widgets-loader/1.4.4/js/ingo.loader.widget.js",
+
+    // InGo widget IDs (public). Fill these in from the InGo partner console.
+    loginWidgetId:        "REPLACE_LOGIN_WIDGET_ID",
+    confirmationWidgetId: "REPLACE_CONFIRMATION_WIDGET_ID",
+    socialWidgetId:       "REPLACE_SOCIAL_WIDGET_ID",
+
+    // Bizzabo — taken verbatim from the embed snippet.
+    bizzabo: {
+      flowId:            "57c83407-ba1e-49b4-899d-bdb3b02d15da",
+      eventId:           "732562",
+      uniqueName:        "732562",
+      registrationProxy: true,
+      inlineWidget:      true,
+      ticketsSrc: "https://organizer.bizzabo.com/widgets/flows/tickets/ticketsSelect.js",
+      popupSrc:   "https://organizer.bizzabo.com/widgets/flows/popup/registrationPopup.js"
+    },
+
+    // Message types that mean "registration finished". Unknown for now —
+    // run once with the debug panel open, complete a registration, and copy
+    // whatever bzsdk.* type appears at the end into this list.
+    completionTypes: [
+      "bzsdk.registrationComplete",
+      "bzsdk.registrationSuccess",
+      "bzsdk.orderComplete"
+    ],
+
+    // Origins allowed to send us completion messages. With
+    // registrationProxy the iframe is served from the event's own website
+    // domain, so this is filled in from the iframe src once it appears.
+    allowedOrigins: []
+  };
+
+  // Turn on Bizzabo's own widget logging: it console.logs every inbound
+  // message type and payload. This is how you discover completionTypes.
+  try { localStorage.setItem("debugWidget", "true"); } catch (e) {}
+
+  // ==========================================================
+  // Debug panel
+  // ==========================================================
+  var logEl = document.getElementById("debug-log");
+  function log(label, detail) {
+    var line = document.createElement("div");
+    line.innerHTML = "<b>" + label + "</b> " +
+      (detail === undefined ? "" : String(typeof detail === "object" ? JSON.stringify(detail) : detail));
+    logEl.appendChild(line);
+    logEl.parentNode.scrollTop = logEl.parentNode.scrollHeight;
+    console.log("[ingo-bizzabo]", label, detail);
+  }
+
+  // ==========================================================
+  // InGo loader — load the script once with no data-ingo-* attributes so
+  // it never auto-mounts anything of its own.
+  // ==========================================================
+  var loaderPromise = null;
+  function loadIngoLoader() {
+    if (window.InGo && window.InGo.loaderWidget) return Promise.resolve();
+    if (!loaderPromise) {
+      loaderPromise = new Promise(function (resolve, reject) {
+        var s = document.createElement("script");
+        s.src = CONFIG.ingoLoader;
+        s.async = true;
+        s.onload = resolve;
+        s.onerror = function () { loaderPromise = null; s.remove(); reject(new Error("InGo loader failed")); };
+        document.head.appendChild(s);
+      });
+    }
+    return loaderPromise;
+  }
+
+  // Mount a non-Login InGo widget (Confirmation / Social) the documented
+  // declarative way: loader script tag carrying data-ingo-id.
+  function mountIngoWidget(containerId, widgetId, label) {
+    return new Promise(function (resolve) {
+      var container = document.getElementById(containerId);
+      var s = document.createElement("script");
+      s.src = CONFIG.ingoLoader;
+      s.async = true;
+      s.setAttribute("data-ingo-id", widgetId);
+      s.onload = function () { log(label + " widget loaded"); resolve(); };
+      s.onerror = function () { log(label + " widget FAILED to load"); resolve(); };
+      container.appendChild(s);
+    });
+  }
+
+  // ==========================================================
+  // STAGE 1 — Login widget
+  // ==========================================================
+  function mountLoginWidget() {
+    // The InGo widget REPLACES its target node, so hand it a disposable one.
+    var host = document.getElementById("ingo-login-mount");
+    var mountNode = document.createElement("div");
+    host.appendChild(mountNode);
+
+    // postAuthScript is evaluated as
+    //   new Function('selection', 'status', 'nextUrl', script)
+    // Stash the arguments so you can inspect the shape of `selection` in the
+    // console — that's what you'd map into Bizzabo's data-params for prefill.
+    var postAuthScript = [
+      "try { window.__ingoAuth = { selection: selection, status: status, nextUrl: nextUrl }; } catch (e) {}",
+      "if (status === 'success') { window.dispatchEvent(new CustomEvent('ingo-express-auth')); }"
+    ].join("\n");
+
+    window.addEventListener("ingo-express-auth", function () {
+      log("InGo auth success", window.__ingoAuth && window.__ingoAuth.selection);
+      goToRegistration(window.__ingoAuth && window.__ingoAuth.selection);
+    });
+
+    return loadIngoLoader().then(function () {
+      return window.InGo.loaderWidget({
+        widgetId: CONFIG.loginWidgetId,
+        target: mountNode,
+        authInPopup: true,        // social auth in a popup
+        redirectAfterAuth: false, // never navigate this page away
+        newWindow: false,
+        modal: false,
+        autostart: false,
+        showManual: false,        // we provide our own skip link
+        showManualAsButton: false,
+        registerDisplayFields: false,
+        postAuthScript: postAuthScript
+      });
+    }).then(function () {
+      log("InGo Login widget mounted");
+    }).catch(function (err) {
+      log("InGo Login widget error", err.message);
+    });
+  }
+
+  // ==========================================================
+  // STAGE 2 — Bizzabo registration flow widget
+  //
+  // Injected here rather than left inline so that `data-params` can carry
+  // values captured in stage 1. registrationPopup.js appends data-params
+  // verbatim to the registration iframe URL, which is the only prefill
+  // delivery vector Bizzabo exposes. Whether the flow app READS those
+  // params still has to be verified.
+  // ==========================================================
+  function mountBizzabo(selection) {
+    var bz = CONFIG.bizzabo;
+    var mount = document.getElementById("bizzabo-mount");
+
+    // Optional prefill attempt. Adjust the key names once you know what the
+    // registration flow app actually reads.
+    var params = "";
+    if (selection) {
+      var pairs = [];
+      if (selection.email)     pairs.push("email=" + encodeURIComponent(selection.email));
+      if (selection.firstName) pairs.push("firstName=" + encodeURIComponent(selection.firstName));
+      if (selection.lastName)  pairs.push("lastName=" + encodeURIComponent(selection.lastName));
+      params = pairs.join("&");
+    }
+
+    // 2a. Inline ticket-selection container. ticketsSelect.js finds this by
+    //     class, so it must exist in the DOM before that script executes.
+    var div = document.createElement("div");
+    div.className = "bz-widget-tickets-inline";
+    div.style.cssText = "display:inline-flex;width:100%;";
+    div.setAttribute("data-flow-id", bz.flowId);
+    div.setAttribute("data-event-id", bz.eventId);
+    if (bz.registrationProxy) div.setAttribute("data-registration-proxy", "true");
+    mount.appendChild(div);
+
+    // 2b. Config carrier. registrationPopup.js reads its whole configuration
+    //     off the element with this exact id — it needs no script body.
+    var cfg = document.createElement("script");
+    cfg.type = "text/javascript";
+    cfg.id = "bz-popup-registration-script-" + bz.flowId;
+    cfg.setAttribute("data-event-id", bz.eventId);
+    cfg.setAttribute("data-flow-id", bz.flowId);
+    cfg.setAttribute("data-unique-name", bz.uniqueName);
+    if (bz.registrationProxy) cfg.setAttribute("data-registration-proxy", "true");
+    if (bz.inlineWidget)      cfg.setAttribute("data-inline-widget", "true");
+    if (params)               cfg.setAttribute("data-params", params);
+    mount.appendChild(cfg);
+
+    // 2c. Loaders. Must come from organizer.bizzabo.com — the script derives
+    //     the registration and events origins by regex on its own src, and
+    //     throws on anything else. The popup loader reads data-flow-id off
+    //     itself via document.currentScript.
+    var tickets = document.createElement("script");
+    tickets.type = "text/javascript";
+    tickets.async = true;
+    tickets.src = bz.ticketsSrc;
+    document.body.appendChild(tickets);
+
+    var popup = document.createElement("script");
+    popup.type = "text/javascript";
+    popup.async = true;
+    popup.setAttribute("data-flow-id", bz.flowId);
+    if (bz.inlineWidget) popup.setAttribute("data-inline-widget", "true");
+    popup.src = bz.popupSrc;
+    document.body.appendChild(popup);
+
+    log("Bizzabo widget injected", params ? "with data-params: " + params : "no prefill params");
+    watchForIframe();
+  }
+
+  // Record the iframe origin so completion messages can be origin-checked.
+  function watchForIframe() {
+    var find = function () {
+      return document.querySelector('iframe[id^="bz-registration-frame"], iframe[src*="/flows/events/"]');
+    };
+    var handle = function (iframe) {
+      try {
+        var origin = new URL(iframe.src).origin;
+        if (CONFIG.allowedOrigins.indexOf(origin) === -1) CONFIG.allowedOrigins.push(origin);
+        log("Bizzabo iframe origin", origin);
+      } catch (e) {}
+    };
+    var existing = find();
+    if (existing) return handle(existing);
+    var obs = new MutationObserver(function () {
+      var el = find();
+      if (el) { obs.disconnect(); handle(el); }
+    });
+    obs.observe(document.body, { childList: true, subtree: true });
+  }
+
+  // ==========================================================
+  // Completion detection
+  //
+  // registrationPopup.js shows the iframe->parent protocol is
+  // { type, payload } under a "bzsdk." namespace. We log every one of them
+  // so you can identify the completion event, and fire stage 3 on a match.
+  // ==========================================================
+  window.addEventListener("message", function (event) {
+    var data = event.data;
+    if (!data || typeof data !== "object" || typeof data.type !== "string") return;
+    if (data.type.indexOf("bzsdk.") !== 0) return;
+
+    log("bzsdk message: " + data.type, data.payload);
+
+    if (CONFIG.allowedOrigins.length &&
+        CONFIG.allowedOrigins.indexOf(event.origin) === -1) {
+      log("  ignored — unexpected origin", event.origin);
+      return;
+    }
+    if (CONFIG.completionTypes.indexOf(data.type) !== -1) goToConfirmation();
+  });
+
+  // ==========================================================
+  // Stage transitions
+  // ==========================================================
+  var stage = "login";
+
+  function goToRegistration(selection) {
+    if (stage !== "login") return;
+    stage = "registration";
+    document.getElementById("stage-login").hidden = true;
+    document.getElementById("stage-registration").hidden = false;
+    mountBizzabo(selection);
+  }
+
+  function goToConfirmation() {
+    if (stage === "confirmation") return;
+    stage = "confirmation";
+    document.getElementById("stage-registration").hidden = true;
+    document.getElementById("stage-confirmation").hidden = false;
+
+    // Confirmation fires its beacon first, Social only after.
+    mountIngoWidget("ingo-confirmation-mount", CONFIG.confirmationWidgetId, "Confirmation")
+      .then(function () {
+        return mountIngoWidget("ingo-social-mount", CONFIG.socialWidgetId, "Social");
+      });
+  }
+
+  // Manual escape hatches while the completion event is still unknown.
+  document.getElementById("skip-login").addEventListener("click", function () {
+    log("Login skipped — manual path");
+    goToRegistration(null);
+  });
+  document.getElementById("force-complete").addEventListener("click", goToConfirmation);
+  window.ingoBizzabo = { complete: goToConfirmation, config: CONFIG };
+
+  // ==========================================================
+  mountLoginWidget();
+})();
+</script>
+</body>
+</html>
