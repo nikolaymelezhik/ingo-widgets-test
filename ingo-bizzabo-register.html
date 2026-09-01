@@ -84,14 +84,17 @@
       popupSrc:   "https://organizer.bizzabo.com/widgets/flows/popup/registrationPopup.js"
     },
 
-    // Message types that mean "registration finished". Unknown for now —
-    // run once with the debug panel open, complete a registration, and copy
-    // whatever bzsdk.* type appears at the end into this list.
-    completionTypes: [
-      "bzsdk.registrationComplete",
-      "bzsdk.registrationSuccess",
-      "bzsdk.orderComplete"
-    ],
+    // Confirmed in the sandbox: the widget posts this to the parent when
+    // registration finishes — { type, flowId, to: "inlineTicketWidget" }.
+    completionTypes: ["registrationCompleted"],
+
+    // Real event name is known now, so the content-matching fallback is off.
+    heuristicCompletion: false,
+
+    // registrationCompleted arrives BEFORE the analytics message carrying
+    // buyerEmail / buyerName, so wait briefly for it before mounting the
+    // Confirmation widget. Fires anyway if the analytics message never comes.
+    attendeeGraceMs: 800,
 
     // Origins allowed to send us completion messages. With
     // registrationProxy the iframe is served from the event's own website
@@ -138,13 +141,22 @@
 
   // Mount a non-Login InGo widget (Confirmation / Social) the documented
   // declarative way: loader script tag carrying data-ingo-id.
-  function mountIngoWidget(containerId, widgetId, label) {
+  function mountIngoWidget(containerId, widgetId, label, attendee) {
     return new Promise(function (resolve) {
       var container = document.getElementById(containerId);
       var s = document.createElement("script");
       s.src = CONFIG.ingoLoader;
       s.async = true;
       s.setAttribute("data-ingo-id", widgetId);
+
+      // Attendee details harvested from Bizzabo's orderCompleted analytics
+      // payload. Same mechanism InGo's GTM install on Bizzabo already uses.
+      if (attendee) {
+        if (attendee.email)     s.setAttribute("data-ingo-attendee.email", attendee.email);
+        if (attendee.firstName) s.setAttribute("data-ingo-attendee.firstName", attendee.firstName);
+        if (attendee.lastName)  s.setAttribute("data-ingo-attendee.lastName", attendee.lastName);
+        log(label + " widget attendee", attendee);
+      }
       s.onload = function () { log(label + " widget loaded"); resolve(); };
       s.onerror = function () { log(label + " widget FAILED to load"); resolve(); };
       container.appendChild(s);
@@ -310,28 +322,83 @@
   // ==========================================================
   window.addEventListener("message", function (event) {
     var data = event.data;
-    if (!data || typeof data !== "object" || typeof data.type !== "string") return;
 
-    // Bizzabo uses TWO message shapes: namespaced ones ({ type: "bzsdk.*",
-    // payload }) and flat ones ({ to, type: "ticketWidgetShouldResize",
-    // flowId, height }). Log both — the completion event could be either.
-    // Resize fires constantly, so keep it out of the log.
-    if (data.type === "ticketWidgetShouldResize") return;
+    // Messages can arrive as JSON strings, not just objects. Parse and log
+    // EVERYTHING from a non-self origin — we don't yet know the completion
+    // event's shape, and a silent panel must mean "nothing was sent", not
+    // "our filter dropped it".
+    if (typeof data === "string") {
+      try { data = JSON.parse(data); } catch (e) { /* keep the raw string */ }
+    }
+    if (event.origin === window.location.origin) return;
 
-    log("message: " + data.type, data.payload !== undefined ? data.payload : data);
+    var type = (data && typeof data === "object")
+      ? (data.type || data.event || data.name || data.action || "(no type key)")
+      : "(raw)";
+
+    // Resize fires constantly; it would drown the log.
+    if (type === "ticketWidgetShouldResize") return;
+
+    log("message [" + event.origin + "] " + type, data);
 
     if (CONFIG.allowedOrigins.length &&
         CONFIG.allowedOrigins.indexOf(event.origin) === -1) {
-      log("  ignored — unexpected origin", event.origin);
+      log("  ignored — unexpected origin");
       return;
     }
-    if (CONFIG.completionTypes.indexOf(data.type) !== -1) goToConfirmation();
+
+    // Bizzabo's analytics relay carries the attendee details we need.
+    if (type === "bzsdk.analytics.gtmData" &&
+        data.dataLayerObject && data.dataLayerObject.event === "orderCompleted") {
+      var dl = data.dataLayerObject;
+      var name = (dl.buyerName || "").trim();
+      var space = name.indexOf(" ");
+      capturedAttendee = {
+        email: dl.buyerEmail || "",
+        firstName: space === -1 ? name : name.slice(0, space),
+        lastName:  space === -1 ? ""   : name.slice(space + 1),
+        transactionId: dl.transactionId
+      };
+      log("attendee captured", capturedAttendee);
+      if (pendingCompletion) {
+        clearTimeout(pendingCompletion);
+        pendingCompletion = null;
+        goToConfirmation();
+      }
+      return;
+    }
+
+    if (CONFIG.completionTypes.indexOf(type) !== -1) {
+      // Give the analytics payload a moment to arrive; it lands right after.
+      if (capturedAttendee) return goToConfirmation();
+      if (!pendingCompletion) {
+        pendingCompletion = setTimeout(function () {
+          pendingCompletion = null;
+          log("no attendee payload arrived — continuing without it");
+          goToConfirmation();
+        }, CONFIG.attendeeGraceMs);
+      }
+      return;
+    }
+
+    // Fallback while the real event name is unknown: match on content.
+    // Turn this off once completionTypes has the actual value.
+    if (CONFIG.heuristicCompletion) {
+      try {
+        if (/complete|success|registered|confirmation|thank/i.test(JSON.stringify(data))) {
+          log("  heuristic match — advancing to stage 3");
+          goToConfirmation();
+        }
+      } catch (e) {}
+    }
   });
 
   // ==========================================================
   // Stage transitions
   // ==========================================================
   var stage = "login";
+  var capturedAttendee = null;
+  var pendingCompletion = null;
 
   function goToRegistration(selection) {
     if (stage !== "login") return;
@@ -344,11 +411,13 @@
   function goToConfirmation() {
     if (stage === "confirmation") return;
     stage = "confirmation";
+    if (pendingCompletion) { clearTimeout(pendingCompletion); pendingCompletion = null; }
     document.getElementById("stage-registration").hidden = true;
     document.getElementById("stage-confirmation").hidden = false;
 
     // Confirmation fires its beacon first, Social only after.
-    mountIngoWidget("ingo-confirmation-mount", CONFIG.confirmationWidgetId, "Confirmation")
+    mountIngoWidget("ingo-confirmation-mount", CONFIG.confirmationWidgetId,
+                    "Confirmation", capturedAttendee)
       .then(function () {
         return mountIngoWidget("ingo-social-mount", CONFIG.socialWidgetId, "Social");
       });
