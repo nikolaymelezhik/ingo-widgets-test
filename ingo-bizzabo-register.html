@@ -68,7 +68,7 @@
   var CONFIG = {
     ingoLoader: "https://cdn.ingo.me/widgets-loader/1.4.4/js/ingo.loader.widget.js",
 
-    // InGo widget IDs (public). Fill these in from the InGo partner console.
+    // InGo widget IDs (public).
     loginWidgetId:        "665F6108A17443D79F60BE854FCDF366",
     confirmationWidgetId: "A3CC5BD9D27D4890B93D227614F1EB38",
     socialWidgetId:       "D72F0568605142C194805799D19DF48A",
@@ -220,17 +220,33 @@
     }
 
     // 2a. Inline ticket-selection container. ticketsSelect.js finds this by
-    //     class, so it must exist in the DOM before that script executes.
+    //     class and reads ALL of its own config off this element, including
+    //     data-params. It must exist before that script executes.
     var div = document.createElement("div");
     div.className = "bz-widget-tickets-inline";
     div.style.cssText = "display:inline-flex;width:100%;";
     div.setAttribute("data-flow-id", bz.flowId);
     div.setAttribute("data-event-id", bz.eventId);
     if (bz.registrationProxy) div.setAttribute("data-registration-proxy", "true");
+    if (params)               div.setAttribute("data-params", params);
     mount.appendChild(div);
 
-    // 2b. Config carrier. registrationPopup.js reads its whole configuration
-    //     off the element with this exact id — it needs no script body.
+    // 2b. Inline config carrier. REQUIRED whenever registrationProxy is on:
+    //     ticketsSelect.js does
+    //       getElementById("bz-inline-registration-script-" + flowId)
+    //     then immediately calls .getAttribute("data-unique-name") on it.
+    //     Omit this element and you get
+    //       "Cannot read properties of null (reading 'getAttribute')".
+    var inlineCfg = document.createElement("script");
+    inlineCfg.type = "text/javascript";
+    inlineCfg.className = "bz-inline-widget-script";
+    inlineCfg.id = "bz-inline-registration-script-" + bz.flowId;
+    inlineCfg.setAttribute("data-event-id", bz.eventId);
+    inlineCfg.setAttribute("data-unique-name", bz.uniqueName);
+    mount.appendChild(inlineCfg);
+
+    // 2c. Popup config carrier. registrationPopup.js reads its whole
+    //     configuration off the element with this exact id — no script body.
     var cfg = document.createElement("script");
     cfg.type = "text/javascript";
     cfg.id = "bz-popup-registration-script-" + bz.flowId;
@@ -295,9 +311,14 @@
   window.addEventListener("message", function (event) {
     var data = event.data;
     if (!data || typeof data !== "object" || typeof data.type !== "string") return;
-    if (data.type.indexOf("bzsdk.") !== 0) return;
 
-    log("bzsdk message: " + data.type, data.payload);
+    // Bizzabo uses TWO message shapes: namespaced ones ({ type: "bzsdk.*",
+    // payload }) and flat ones ({ to, type: "ticketWidgetShouldResize",
+    // flowId, height }). Log both — the completion event could be either.
+    // Resize fires constantly, so keep it out of the log.
+    if (data.type === "ticketWidgetShouldResize") return;
+
+    log("message: " + data.type, data.payload !== undefined ? data.payload : data);
 
     if (CONFIG.allowedOrigins.length &&
         CONFIG.allowedOrigins.indexOf(event.origin) === -1) {
