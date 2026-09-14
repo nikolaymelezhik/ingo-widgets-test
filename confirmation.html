@@ -7,10 +7,6 @@
   <style>
     body {
       font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Arial, sans-serif;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 100vh;
       margin: 0;
       background: #f4f6fa;
     }
@@ -20,6 +16,7 @@
       border-radius: 12px;
       box-shadow: 0 2px 10px rgba(0,0,0,0.08);
       width: 480px;
+      margin: 60px auto;
       text-align: center;
     }
     h1 {
@@ -32,6 +29,9 @@
       color: #555;
       margin-bottom: 24px;
     }
+    .spacer {
+      /* висота регулюється через ?offset=NNN в URL, дефолт 1400px */
+    }
   </style>
 </head>
 <body>
@@ -39,18 +39,22 @@
     <h1>You're Registered! 🎉</h1>
     <p>Thanks for signing up. Share the news with your network below.</p>
 
-    <form id="pageEditorForm" action="" method="GET">
-      <input type="hidden" name="submitted" value="1">
+    <!-- InGo Confirmation Widget -->
+    <script src="https://cdn-staging.ingo.me/widgets/B240134F6D3042C099233B4011204005.js"></script>
+  </div>
 
-      <!-- InGo Confirmation Widget -->
-      <script src="https://cdn-staging.ingo.me/widgets/B240134F6D3042C099233B4011204005.js"></script>
-      <!-- InGo Social Surface -->
-      <script src="https://cdn-staging.ingo.me/widgets/4390CBFE1A3146E8895F90BAEEEC143B.js"></script>
+  <div class="spacer"></div>
 
-    </form>
+  <div class="container">
+    <!-- InGo Social Surface -->
+    <script src="https://cdn-staging.ingo.me/widgets/4390CBFE1A3146E8895F90BAEEEC143B.js"></script>
   </div>
 
   <script>
+    // Динамічна висота spacer-а: ?offset=850 у URL змінює позицію CTA
+    const px = new URLSearchParams(location.search).get('offset') || 1400;
+    document.querySelector('.spacer').style.height = px + 'px';
+
     // QA: логує, яка саме кнопка сабмітить форму, перед перезавантаженням
     document.addEventListener('submit', (e) => {
       const s = e.submitter;
